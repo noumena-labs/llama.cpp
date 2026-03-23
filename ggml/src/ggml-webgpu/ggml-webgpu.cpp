@@ -101,6 +101,27 @@ static inline void compute_2d_workgroups(uint32_t total_wg, uint32_t max_per_dim
 
 /* End Constants */
 
+static inline wgpu::CallbackMode ggml_webgpu_callback_mode() {
+#ifdef __EMSCRIPTEN__
+    return wgpu::CallbackMode::AllowProcessEvents;
+#else
+    return wgpu::CallbackMode::AllowSpontaneous;
+#endif
+}
+
+#ifdef __EMSCRIPTEN__
+static inline void ggml_webgpu_emscripten_yield(int poll_count) {
+    // Favor responsiveness first, then back off to reduce CPU burn if we're stalled.
+    if (poll_count < 64) {
+        emscripten_sleep(0);
+    } else if (poll_count < 4096) {
+        emscripten_sleep(1);
+    } else {
+        emscripten_sleep(2);
+    }
+}
+#endif
+
 // This is a "fake" base pointer, since WebGPU buffers do not have pointers to
 // their locations.
 static void * const webgpu_ptr_base = (void *) (uintptr_t) 0x1000;  // NOLINT
@@ -303,6 +324,9 @@ struct webgpu_global_context_struct {
     wgpu::Buffer         get_tensor_staging_buf;
     // Global mutex for pipeline and staging buffer, will be refactored to exclude pipeline caches.
     std::recursive_mutex mutex;
+    std::mutex           debug_mutex;
+    std::string          last_submit_label;
+    std::atomic<bool>    device_lost = false;
 
     webgpu_buf_pool                memset_buf_pool;
     std::map<int, webgpu_pipeline> memset_pipelines;  // variant or type index
@@ -454,23 +478,41 @@ static void ggml_webgpu_create_buffer(wgpu::Device &    device,
 
 /** WebGPU Actions */
 
-static bool ggml_backend_webgpu_handle_wait_status(wgpu::WaitStatus status, bool allow_timeout = false) {
-    switch (status) {
-        case wgpu::WaitStatus::Success:
-            return true;
-        case wgpu::WaitStatus::TimedOut:
-            if (allow_timeout) {
-                return false;
-            }
-            GGML_LOG_ERROR("ggml_webgpu: WaitAny timed out unexpectedly\n");
-            return false;
-        case wgpu::WaitStatus::Error:
-            GGML_LOG_ERROR("ggml_webgpu: WaitAny returned an error\n");
-            return false;
-        default:
-            GGML_LOG_ERROR("ggml_webgpu: WaitAny returned an unknown status\n");
-            return false;
+static bool ggml_backend_webgpu_wait_future(webgpu_global_context & ctx,
+                                            wgpu::FutureWaitInfo    wait_info,
+                                            const char *            label,
+                                            int                     max_polls = 100000) {
+    GGML_UNUSED(label);
+    if (ctx->device_lost.load()) {
+        return false;
     }
+#ifndef __EMSCRIPTEN__
+    auto status = ctx->instance.WaitAny(1, &wait_info, UINT64_MAX);
+    if (status == wgpu::WaitStatus::Success) {
+        return true;
+    }
+    return false;
+#else
+    int poll_count = 0;
+    while (poll_count < max_polls) {
+        auto status = ctx->instance.WaitAny(1, &wait_info, 0);
+        if (status == wgpu::WaitStatus::Success) {
+            return true;
+        }
+        if (status == wgpu::WaitStatus::Error) {
+            return false;
+        }
+        if (ctx->device_lost.load()) {
+            return false;
+        }
+        ctx->instance.ProcessEvents();
+#    ifdef __EMSCRIPTEN__
+        ggml_webgpu_emscripten_yield(poll_count);
+#    endif
+        poll_count++;
+    }
+    return false;
+#endif
 }
 
 #ifdef GGML_WEBGPU_GPU_PROFILE
@@ -487,17 +529,16 @@ static void ggml_backend_webgpu_wait_profile_futures(webgpu_global_context &    
         return;
     }
 
-    uint64_t timeout_ms = block ? UINT64_MAX : 0;
     if (block) {
         while (!futures.empty()) {
-            auto waitStatus = ctx->instance.WaitAny(futures.size(), futures.data(), timeout_ms);
-            if (ggml_backend_webgpu_handle_wait_status(waitStatus)) {
-                ggml_backend_webgpu_erase_completed_futures(futures);
+            if (!ggml_backend_webgpu_wait_future(ctx, futures[0], "profile_future")) {
+                GGML_ABORT("ggml_webgpu: failed waiting for profile future");
             }
+            ggml_backend_webgpu_erase_completed_futures(futures);
         }
     } else {
-        auto waitStatus = ctx->instance.WaitAny(futures.size(), futures.data(), timeout_ms);
-        if (ggml_backend_webgpu_handle_wait_status(waitStatus, true)) {
+        auto waitStatus = ctx->instance.WaitAny(futures.size(), futures.data(), 0);
+        if (waitStatus == wgpu::WaitStatus::Success) {
             ggml_backend_webgpu_erase_completed_futures(futures);
         }
     }
@@ -514,13 +555,13 @@ static void ggml_backend_webgpu_wait(webgpu_global_context &          ctx,
 
     bool blocking_wait = block || subs.size() >= WEBGPU_MAX_INFLIGHT_SUBS_PER_THREAD;
     while (blocking_wait) {
-        auto waitStatus = ctx->instance.WaitAny(1, &subs[0].submit_done, 0);
-        if (ggml_backend_webgpu_handle_wait_status(waitStatus, true)) {
-#ifdef GGML_WEBGPU_GPU_PROFILE
-            ggml_backend_webgpu_wait_profile_futures(ctx, subs[0].profile_futures, true);
-#endif
-            subs.erase(subs.begin());
+        if (!ggml_backend_webgpu_wait_future(ctx, subs[0].submit_done, "queue_submit")) {
+            GGML_ABORT("ggml_webgpu: failed waiting for queue submission");
         }
+#ifdef GGML_WEBGPU_GPU_PROFILE
+        ggml_backend_webgpu_wait_profile_futures(ctx, subs[0].profile_futures, true);
+#endif
+        subs.erase(subs.begin());
         blocking_wait = (block && !subs.empty()) || subs.size() >= WEBGPU_MAX_INFLIGHT_SUBS_PER_THREAD;
     }
 
@@ -530,8 +571,7 @@ static void ggml_backend_webgpu_wait(webgpu_global_context &          ctx,
 
     // Poll each submit future once and remove completed submissions.
     for (auto sub = subs.begin(); sub != subs.end();) {
-        auto waitStatus = ctx->instance.WaitAny(1, &sub->submit_done, 0);
-        bool success    = ggml_backend_webgpu_handle_wait_status(waitStatus, true);
+        bool success = ggml_backend_webgpu_wait_future(ctx, sub->submit_done, "queue_submit", 0);
 #ifdef GGML_WEBGPU_GPU_PROFILE
         ggml_backend_webgpu_wait_profile_futures(ctx, sub->profile_futures, false);
         if (success && sub->profile_futures.empty()) {
@@ -545,19 +585,52 @@ static void ggml_backend_webgpu_wait(webgpu_global_context &          ctx,
     }
 }
 
-static void ggml_backend_webgpu_map_buffer(webgpu_global_context & ctx,
+static bool ggml_backend_webgpu_map_buffer(webgpu_global_context & ctx,
                                            wgpu::Buffer &          buffer,
                                            wgpu::MapMode           mode,
                                            size_t                  offset,
                                            size_t                  size) {
-    ctx->instance.WaitAny(buffer.MapAsync(mode, offset, size, wgpu::CallbackMode::AllowSpontaneous,
-                                          [](wgpu::MapAsyncStatus status, wgpu::StringView message) {
-                                              if (status != wgpu::MapAsyncStatus::Success) {
-                                                  GGML_LOG_ERROR("ggml_webgpu: Failed to map buffer: %s\n",
-                                                                 message.data);
-                                              }
-                                          }),
-                          UINT64_MAX);
+    if (ctx->device_lost.load()) {
+        GGML_LOG_ERROR("ggml_webgpu: device lost before map_buffer\n");
+        return false;
+    }
+
+    auto map_state = buffer.GetMapState();
+    if (map_state != wgpu::BufferMapState::Unmapped) {
+        if (map_state == wgpu::BufferMapState::Mapped) {
+            return true;
+        }
+        GGML_LOG_ERROR("ggml_webgpu: Buffer map pending, cannot map\n");
+        return false;
+    }
+
+    std::atomic<bool> map_done{ false };
+    std::atomic<bool> map_success{ false };
+
+    wgpu::Future map_future =
+        buffer.MapAsync(mode, offset, size, ggml_webgpu_callback_mode(),
+                        [&map_done, &map_success](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+                            if (status != wgpu::MapAsyncStatus::Success) {
+                                GGML_LOG_ERROR("ggml_webgpu: Failed to map buffer: %s\n", message.data);
+                                map_success.store(false);
+                            } else {
+                                map_success.store(true);
+                            }
+                            map_done.store(true);
+                        });
+
+    if (!ggml_backend_webgpu_wait_future(ctx, wgpu::FutureWaitInfo{ map_future }, "map_buffer")) {
+        GGML_LOG_ERROR("ggml_webgpu: MapAsync timed out\n");
+        return false;
+    }
+    if (!map_done.load()) {
+        GGML_LOG_ERROR("ggml_webgpu: MapAsync did not complete\n");
+        return false;
+    }
+    if (!map_success.load()) {
+        return false;
+    }
+    return true;
 }
 
 #ifdef GGML_WEBGPU_DEBUG
@@ -569,7 +642,11 @@ static void ggml_backend_webgpu_debug(webgpu_global_context & ctx) {
     encoder.CopyBufferToBuffer(ctx->debug_dev_buf, 0, ctx->debug_host_buf, 0, ctx->debug_host_buf.GetSize());
     wgpu::CommandBuffer commands = encoder.Finish();
     ctx->queue.Submit(1, &commands);
-    ggml_backend_webgpu_map_buffer(ctx, ctx->debug_host_buf, wgpu::MapMode::Read, 0, ctx->debug_host_buf.GetSize());
+    if (!ggml_backend_webgpu_map_buffer(ctx, ctx->debug_host_buf, wgpu::MapMode::Read, 0,
+                                        ctx->debug_host_buf.GetSize())) {
+        GGML_LOG_ERROR("ggml_webgpu: Debug buffer map failed\n");
+        return;
+    }
     const float * debug_data = (const float *) ctx->debug_host_buf.GetConstMappedRange();
     std::cout << "debug[0]: " << debug_data[0] << "\n";
     ctx->debug_host_buf.Unmap();
@@ -590,10 +667,14 @@ static webgpu_submission ggml_backend_webgpu_submit(webgpu_global_context &     
         command_buffers.push_back(command.commands);
         params_bufs.insert(params_bufs.end(), command.params_bufs.begin(), command.params_bufs.end());
     }
+    if (ctx->device_lost.load()) {
+        GGML_LOG_ERROR("ggml_webgpu: device lost before queue submit (last: %s)\n", ctx->last_submit_label.c_str());
+        return {};
+    }
     ctx->queue.Submit(command_buffers.size(), command_buffers.data());
 
     wgpu::Future p_f = ctx->queue.OnSubmittedWorkDone(
-        wgpu::CallbackMode::AllowSpontaneous,
+        ggml_webgpu_callback_mode(),
         [&param_buf_pool, params_bufs](wgpu::QueueWorkDoneStatus status, wgpu::StringView message) {
             if (status != wgpu::QueueWorkDoneStatus::Success) {
                 GGML_LOG_ERROR("ggml_webgpu: Failed to submit commands: %s\n", std::string(message).c_str());
@@ -609,7 +690,7 @@ static webgpu_submission ggml_backend_webgpu_submit(webgpu_global_context &     
         auto ts_bufs = command.timestamp_query_bufs;
 
         wgpu::Future f = ts_bufs.host_buf.MapAsync(
-            wgpu::MapMode::Read, 0, ts_bufs.host_buf.GetSize(), wgpu::CallbackMode::AllowSpontaneous,
+            wgpu::MapMode::Read, 0, ts_bufs.host_buf.GetSize(), ggml_webgpu_callback_mode(),
             [ctx, ts_bufs, label](wgpu::MapAsyncStatus status, wgpu::StringView message) {
                 if (status != wgpu::MapAsyncStatus::Success) {
                     GGML_LOG_ERROR("ggml_webgpu: Failed to map timestamp buffer: %s\n", std::string(message).c_str());
@@ -2428,7 +2509,7 @@ static std::optional<webgpu_command> ggml_webgpu_encode_node(webgpu_context ctx,
     if ((node->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
         return std::nullopt;
     }
-    WEBGPU_LOG_DEBUG("ggml_webgpu_encode_node(" << node << ", " << ggml_op_name(node->op) << ")");
+    // WEBGPU_LOG_DEBUG("ggml_webgpu_encode_node(" << node << ", " << ggml_op_name(node->op) << ")");
 
     ggml_tensor * src0 = node->src[0];
     ggml_tensor * src1 = node->src[1];
@@ -2515,7 +2596,7 @@ static std::optional<webgpu_command> ggml_webgpu_encode_node(webgpu_context ctx,
 }
 
 static ggml_status ggml_backend_webgpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
-    WEBGPU_LOG_DEBUG("ggml_backend_webgpu_graph_compute(" << cgraph->n_nodes << " nodes)");
+    // WEBGPU_LOG_DEBUG("ggml_backend_webgpu_graph_compute(" << cgraph->n_nodes << " nodes)");
 
     ggml_backend_webgpu_context * backend_ctx = (ggml_backend_webgpu_context *) backend->context;
     webgpu_context                ctx         = backend_ctx->webgpu_ctx;
@@ -2622,8 +2703,8 @@ static void ggml_backend_webgpu_buffer_memset_tensor(ggml_backend_buffer_t buffe
 
     ggml_backend_webgpu_buffer_context * buf_ctx = (ggml_backend_webgpu_buffer_context *) buffer->context;
 
-    WEBGPU_LOG_DEBUG("ggml_backend_webgpu_buffer_memset_tensor(" << buf_ctx->label << ", " << tensor << ", " << value
-                                                                 << ", " << offset << ", " << size << ")");
+    // WEBGPU_LOG_DEBUG("ggml_backend_webgpu_buffer_memset_tensor(" << buf_ctx->label << ", " << tensor << ", " << value
+    //                                                              << ", " << offset << ", " << size << ")");
 
     size_t total_offset = webgpu_tensor_offset(tensor) + tensor->view_offs + offset;
 
@@ -2641,8 +2722,8 @@ static void ggml_backend_webgpu_buffer_set_tensor(ggml_backend_buffer_t buffer,
     WEBGPU_CPU_PROFILE_TOTAL_START(set_tensor);
     ggml_backend_webgpu_buffer_context * buf_ctx = (ggml_backend_webgpu_buffer_context *) buffer->context;
 
-    WEBGPU_LOG_DEBUG("ggml_backend_webgpu_buffer_set_tensor(" << buf_ctx->label << ", " << tensor << ", " << data
-                                                              << ", " << offset << ", " << size << ")");
+    // WEBGPU_LOG_DEBUG("ggml_backend_webgpu_buffer_set_tensor(" << buf_ctx->label << ", " << tensor << ", " << data
+    //                                                              << ", " << offset << ", " << size << ")");
 
     size_t total_offset = webgpu_tensor_offset(tensor) + tensor->view_offs + offset;
 
@@ -2663,15 +2744,15 @@ static void ggml_backend_webgpu_buffer_set_tensor(ggml_backend_buffer_t buffer,
                                           total_offset + (size - remaining_size), remaining_size);
     } else {
         // wait for WriteBuffer to complete
-        buf_ctx->global_ctx->instance.WaitAny(buf_ctx->global_ctx->queue.OnSubmittedWorkDone(
-                                                  wgpu::CallbackMode::AllowSpontaneous,
-                                                  [](wgpu::QueueWorkDoneStatus status, wgpu::StringView message) {
-                                                      if (status != wgpu::QueueWorkDoneStatus::Success) {
-                                                          GGML_LOG_ERROR("ggml_webgpu: Failed to submit commands: %s\n",
-                                                                         std::string(message).c_str());
-                                                      }
-                                                  }),
-                                              UINT64_MAX);
+        wgpu::Future done_future = buf_ctx->global_ctx->queue.OnSubmittedWorkDone(
+            wgpu::CallbackMode::AllowSpontaneous, [](wgpu::QueueWorkDoneStatus status, wgpu::StringView message) {
+                if (status != wgpu::QueueWorkDoneStatus::Success) {
+                    GGML_LOG_ERROR("ggml_webgpu: Failed to submit commands: %s\n", std::string(message).c_str());
+                }
+            });
+        if (!ggml_backend_webgpu_wait_future(buf_ctx->global_ctx, { done_future }, "set_tensor_submit")) {
+            GGML_ABORT("ggml_webgpu: WriteBuffer submit wait failed");
+        }
     }
     WEBGPU_CPU_PROFILE_TOTAL_END(set_tensor, buf_ctx->global_ctx);
 }
@@ -2683,9 +2764,9 @@ static void ggml_backend_webgpu_buffer_get_tensor(ggml_backend_buffer_t buffer,
                                                   size_t                size) {
     WEBGPU_CPU_PROFILE_TOTAL_START(get_tensor);
     ggml_backend_webgpu_buffer_context * buf_ctx = (ggml_backend_webgpu_buffer_context *) buffer->context;
-    WEBGPU_LOG_DEBUG("ggml_backend_webgpu_buffer_get_tensor(" << buf_ctx->label << ", " << tensor << ", " << data
-                                                              << ", " << offset << ", " << size << ")");
-    wgpu::Device device = buf_ctx->global_ctx->device;
+    // WEBGPU_LOG_DEBUG("ggml_backend_webgpu_buffer_get_tensor(" << buf_ctx->label << ", " << tensor << ", " << data
+    //                                                              << ", " << offset << ", " << size << ")");
+    wgpu::Device                         device  = buf_ctx->global_ctx->device;
 
     size_t total_offset = webgpu_tensor_offset(tensor) + tensor->view_offs + offset;
 
@@ -2730,7 +2811,7 @@ static void ggml_backend_webgpu_buffer_get_tensor(ggml_backend_buffer_t buffer,
 }
 
 static void ggml_backend_webgpu_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
-    WEBGPU_LOG_DEBUG("ggml_backend_webgpu_buffer_clear(" << buffer << ", " << (uint32_t) value << ")");
+    // WEBGPU_LOG_DEBUG("ggml_backend_webgpu_buffer_clear(" << buffer << ", " << (uint32_t) value << ")");
     WEBGPU_CPU_PROFILE_TOTAL_START(clear);
     ggml_backend_webgpu_buffer_context * buf_ctx = (ggml_backend_webgpu_buffer_context *) buffer->context;
     ggml_backend_webgpu_buffer_memset(buf_ctx->global_ctx, buf_ctx->buffer, value, 0, buffer->size);
@@ -2764,7 +2845,7 @@ static ggml_backend_buffer_t ggml_backend_webgpu_buffer_type_alloc_buffer(ggml_b
     static std::atomic<int> buffer_count;
     int                     buffer_id = buffer_count++;
     std::string             buf_name  = "tensor_buf" + std::to_string(buffer_id);
-    WEBGPU_LOG_DEBUG("ggml_backend_webgpu_buffer_type_alloc_buffer_" << buffer_id << ": " << size << " bytes");
+    // WEBGPU_LOG_DEBUG("ggml_backend_webgpu_buffer_type_alloc_buffer_" << buffer_id << ": " << size << " bytes");
 
     ggml_backend_webgpu_device_context * ctx = static_cast<ggml_backend_webgpu_device_context *>(buft->device->context);
     wgpu::Buffer                         buf;
@@ -3030,18 +3111,19 @@ static bool create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
     options.nextInChain                   = &adapterTogglesDesc;
 #endif
 
-    ctx->webgpu_global_ctx->instance.WaitAny(
-        ctx->webgpu_global_ctx->instance.RequestAdapter(
-            &options, wgpu::CallbackMode::AllowSpontaneous,
-            [&ctx](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, const char * message) {
-                if (status != wgpu::RequestAdapterStatus::Success) {
-                    GGML_LOG_ERROR("ggml_webgpu: Failed to get an adapter: %s\n", message);
-                    return;
-                }
-                ctx->webgpu_global_ctx->adapter = std::move(adapter);
-            }),
-        UINT64_MAX);
-    GGML_ASSERT(ctx->webgpu_global_ctx->adapter != nullptr);
+    wgpu::Future adapter_future = ctx->webgpu_global_ctx->instance.RequestAdapter(
+        &options, ggml_webgpu_callback_mode(),
+        [&ctx](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, const char * message) {
+            if (status != wgpu::RequestAdapterStatus::Success) {
+                GGML_LOG_ERROR("ggml_webgpu: Failed to get an adapter: %s\n", message);
+                return;
+            }
+            ctx->webgpu_global_ctx->adapter = std::move(adapter);
+        });
+    if (!ggml_backend_webgpu_wait_future(ctx->webgpu_global_ctx, { adapter_future }, "request_adapter") ||
+        ctx->webgpu_global_ctx->adapter == nullptr) {
+        return false;
+    }
 
     ctx->webgpu_global_ctx->adapter.GetLimits(&ctx->webgpu_global_ctx->capabilities.limits);
 
@@ -3101,14 +3183,20 @@ static bool create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
     dev_desc.requiredFeatures     = required_features.data();
     dev_desc.requiredFeatureCount = required_features.size();
     dev_desc.SetDeviceLostCallback(
-        wgpu::CallbackMode::AllowSpontaneous,
-        [](const wgpu::Device & device, wgpu::DeviceLostReason reason, wgpu::StringView message) {
+        ggml_webgpu_callback_mode(),
+        [ctx](const wgpu::Device & device, wgpu::DeviceLostReason reason, wgpu::StringView message) {
             if (reason == wgpu::DeviceLostReason::Destroyed) {
                 return;
             }
             GGML_UNUSED(device);
-            GGML_LOG_ERROR("ggml_webgpu: Device lost! Reason: %d, Message: %s\n", static_cast<int>(reason),
-                           std::string(message).c_str());
+            ctx->webgpu_global_ctx->device_lost.store(true);
+            std::string last_label;
+            {
+                std::lock_guard<std::mutex> lock(ctx->webgpu_global_ctx->debug_mutex);
+                last_label = ctx->webgpu_global_ctx->last_submit_label;
+            }
+            GGML_LOG_ERROR("ggml_webgpu: Device lost! Reason: %d, Message: %s (last submit: %s)\n",
+                           static_cast<int>(reason), std::string(message).c_str(), last_label.c_str());
         });
     dev_desc.SetUncapturedErrorCallback(
         [](const wgpu::Device & device, wgpu::ErrorType reason, wgpu::StringView message) {
@@ -3133,18 +3221,19 @@ static bool create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
     dev_desc.nextInChain = &deviceTogglesDesc;
 #endif
 
-    ctx->webgpu_global_ctx->instance.WaitAny(
-        ctx->webgpu_global_ctx->adapter.RequestDevice(
-            &dev_desc, wgpu::CallbackMode::AllowSpontaneous,
-            [ctx](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
-                if (status != wgpu::RequestDeviceStatus::Success) {
-                    GGML_LOG_ERROR("ggml_webgpu: Failed to get a device: %s\n", std::string(message).c_str());
-                    return;
-                }
-                ctx->webgpu_global_ctx->device = std::move(device);
-            }),
-        UINT64_MAX);
-    GGML_ASSERT(ctx->webgpu_global_ctx->device != nullptr);
+    wgpu::Future device_future = ctx->webgpu_global_ctx->adapter.RequestDevice(
+        &dev_desc, ggml_webgpu_callback_mode(),
+        [ctx](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
+            if (status != wgpu::RequestDeviceStatus::Success) {
+                GGML_LOG_ERROR("ggml_webgpu: Failed to get a device: %s\n", std::string(message).c_str());
+                return;
+            }
+            ctx->webgpu_global_ctx->device = std::move(device);
+        });
+    if (!ggml_backend_webgpu_wait_future(ctx->webgpu_global_ctx, { device_future }, "request_device") ||
+        ctx->webgpu_global_ctx->device == nullptr) {
+        return false;
+    }
 
     ggml_webgpu_init_memset_pipeline(ctx->webgpu_global_ctx);
     ctx->webgpu_global_ctx->memset_buf_pool.init(ctx->webgpu_global_ctx->device, 1, WEBGPU_PARAMS_BUF_SIZE_BYTES,
@@ -3202,7 +3291,7 @@ static webgpu_context initialize_webgpu_context(ggml_backend_dev_t dev) {
 static ggml_backend_t ggml_backend_webgpu_backend_init(ggml_backend_dev_t dev, const char * params) {
     GGML_UNUSED(params);
 
-    WEBGPU_LOG_DEBUG("ggml_backend_webgpu_backend_init()");
+    // WEBGPU_LOG_DEBUG("ggml_backend_webgpu_backend_init()");
 
     ggml_backend_webgpu_device_context * dev_ctx = static_cast<ggml_backend_webgpu_device_context *>(dev->context);
 
@@ -3542,10 +3631,10 @@ static bool ggml_backend_webgpu_device_supports_op(ggml_backend_dev_t dev, const
                          << ", src0: " << (op->src[0] ? ggml_type_name(op->src[0]->type) : "null")
                          << ", src1: " << (op->src[1] ? ggml_type_name(op->src[1]->type) : "null"));
     } else {
-        WEBGPU_LOG_DEBUG("ggml_webgpu op supported: "
-                         << ggml_op_name(op->op) << " with types dst: " << ggml_type_name(op->type)
-                         << ", src0: " << (op->src[0] ? ggml_type_name(op->src[0]->type) : "null")
-                         << ", src1: " << (op->src[1] ? ggml_type_name(op->src[1]->type) : "null"));
+        // WEBGPU_LOG_DEBUG("ggml_webgpu op supported: "
+        //                  << ggml_op_name(op->op) << " with types dst: " << ggml_type_name(op->type)
+        //                  << ", src0: " << (op->src[0] ? ggml_type_name(op->src[0]->type) : "null")
+        //                  << ", src1: " << (op->src[1] ? ggml_type_name(op->src[1]->type) : "null"));
     }
     return supports_op;
 }
