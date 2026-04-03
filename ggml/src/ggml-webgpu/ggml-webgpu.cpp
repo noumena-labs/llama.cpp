@@ -472,6 +472,25 @@ static void ggml_webgpu_create_buffer(wgpu::Device &    device,
 
 /** WebGPU Actions */
 
+static bool ggml_backend_webgpu_handle_wait_status(wgpu::WaitStatus status, bool allow_timeout = false) {
+    switch (status) {
+        case wgpu::WaitStatus::Success:
+            return true;
+        case wgpu::WaitStatus::TimedOut:
+            if (allow_timeout) {
+                return false;
+            }
+            GGML_LOG_ERROR("ggml_webgpu: WaitAny timed out unexpectedly\n");
+            return false;
+        case wgpu::WaitStatus::Error:
+            GGML_LOG_ERROR("ggml_webgpu: WaitAny returned an error\n");
+            return false;
+        default:
+            GGML_LOG_ERROR("ggml_webgpu: WaitAny returned an unknown status\n");
+            return false;
+    }
+}
+
 static bool ggml_backend_webgpu_wait_future(webgpu_global_context & ctx,
                                             wgpu::FutureWaitInfo    wait_info,
                                             const char *            label,
@@ -523,16 +542,17 @@ static void ggml_backend_webgpu_wait_profile_futures(webgpu_global_context &    
         return;
     }
 
+    uint64_t timeout_ms = block ? UINT64_MAX : 0;
     if (block) {
         while (!futures.empty()) {
-            if (!ggml_backend_webgpu_wait_future(ctx, futures[0], "profile_future")) {
-                GGML_ABORT("ggml_webgpu: failed waiting for profile future");
+            auto waitStatus = ctx->instance.WaitAny(futures.size(), futures.data(), timeout_ms);
+            if (ggml_backend_webgpu_handle_wait_status(waitStatus)) {
+                ggml_backend_webgpu_erase_completed_futures(futures);
             }
-            ggml_backend_webgpu_erase_completed_futures(futures);
         }
     } else {
-        auto waitStatus = ctx->instance.WaitAny(futures.size(), futures.data(), 0);
-        if (waitStatus == wgpu::WaitStatus::Success) {
+        auto waitStatus = ctx->instance.WaitAny(futures.size(), futures.data(), timeout_ms);
+        if (ggml_backend_webgpu_handle_wait_status(waitStatus, true)) {
             ggml_backend_webgpu_erase_completed_futures(futures);
         }
     }
@@ -552,9 +572,10 @@ static void ggml_backend_webgpu_wait(webgpu_global_context &          ctx,
         auto waitStatus = ctx->instance.WaitAny(1, &subs[0].submit_done, WEBGPU_WAIT_ANY_TIMEOUT_MS * 1e6);
         if (ggml_backend_webgpu_handle_wait_status(waitStatus, true)) {
 #ifdef GGML_WEBGPU_GPU_PROFILE
-        ggml_backend_webgpu_wait_profile_futures(ctx, subs[0].profile_futures, true);
+            ggml_backend_webgpu_wait_profile_futures(ctx, subs[0].profile_futures, true);
 #endif
-        subs.erase(subs.begin());
+            subs.erase(subs.begin());
+        }
         blocking_wait = (block && !subs.empty()) || subs.size() >= WEBGPU_MAX_INFLIGHT_SUBS_PER_THREAD;
     }
 
@@ -564,7 +585,8 @@ static void ggml_backend_webgpu_wait(webgpu_global_context &          ctx,
 
     // Poll each submit future once and remove completed submissions.
     for (auto sub = subs.begin(); sub != subs.end();) {
-        bool success = ggml_backend_webgpu_wait_future(ctx, sub->submit_done, "queue_submit", 0);
+        auto waitStatus = ctx->instance.WaitAny(1, &sub->submit_done, 0);
+        bool success    = ggml_backend_webgpu_handle_wait_status(waitStatus, true);
 #ifdef GGML_WEBGPU_GPU_PROFILE
         ggml_backend_webgpu_wait_profile_futures(ctx, sub->profile_futures, false);
         if (success && sub->profile_futures.empty()) {
@@ -577,6 +599,7 @@ static void ggml_backend_webgpu_wait(webgpu_global_context &          ctx,
         }
     }
 }
+
 
 static bool ggml_backend_webgpu_map_buffer(webgpu_global_context & ctx,
                                            wgpu::Buffer &          buffer,
