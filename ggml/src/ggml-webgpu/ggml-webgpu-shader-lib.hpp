@@ -1081,6 +1081,126 @@ class ggml_webgpu_shader_lib {
                 defines.push_back("BLOCK_SIZE=1u");
                 variant += "_i32";
                 break;
+            case GGML_TYPE_Q4_0:
+                defines.push_back("BYTE_HELPERS");
+                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("SRC_TYPE=u32");
+                defines.push_back("DST_TYPE=f32");
+                defines.push_back("BLOCK_SIZE=32u");
+                defines.push_back("Q4_0");
+                variant += "_q4_0";
+                break;
+            case GGML_TYPE_Q5_0:
+                defines.push_back("BYTE_HELPERS");
+                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("SRC_TYPE=u32");
+                defines.push_back("DST_TYPE=f32");
+                defines.push_back("BLOCK_SIZE=32u");
+                defines.push_back("Q5_0");
+                variant += "_q5_0";
+                break;
+            case GGML_TYPE_Q8_0:
+                defines.push_back("BYTE_HELPERS");
+                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("SRC_TYPE=u32");
+                defines.push_back("DST_TYPE=f32");
+                defines.push_back("BLOCK_SIZE=32u");
+                defines.push_back("Q8_0");
+                variant += "_q8_0";
+                break;
+            case GGML_TYPE_Q3_K:
+                defines.push_back("BYTE_HELPERS");
+                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("SRC_TYPE=u32");
+                defines.push_back("DST_TYPE=f32");
+                defines.push_back("BLOCK_SIZE=256u");
+                defines.push_back("Q3_K");
+                variant += "_q3_k";
+                break;
+            case GGML_TYPE_Q6_K:
+                defines.push_back("BYTE_HELPERS");
+                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("SRC_TYPE=u32");
+                defines.push_back("DST_TYPE=f32");
+                defines.push_back("BLOCK_SIZE=256u");
+                defines.push_back("Q6_K");
+                variant += "_q6_k";
+                break;
+            case GGML_TYPE_IQ2_XXS:
+                defines.push_back("BYTE_HELPERS");
+                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("SRC_TYPE=u32");
+                defines.push_back("DST_TYPE=f32");
+                defines.push_back("BLOCK_SIZE=256u");
+                defines.push_back("IQ2_XXS");
+                defines.push_back("IQ2_XXS_TABLES");
+                defines.push_back("IQ2_XXS_GRID");
+                variant += "_iq2_xxs";
+                break;
+            case GGML_TYPE_IQ2_XS:
+                defines.push_back("BYTE_HELPERS");
+                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("SRC_TYPE=u32");
+                defines.push_back("DST_TYPE=f32");
+                defines.push_back("BLOCK_SIZE=256u");
+                defines.push_back("IQ2_XS");
+                defines.push_back("IQ2_XS_TABLES");
+                defines.push_back("IQ2_XS_GRID");
+                variant += "_iq2_xs";
+                break;
+            case GGML_TYPE_IQ2_S:
+                defines.push_back("BYTE_HELPERS");
+                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("SRC_TYPE=u32");
+                defines.push_back("DST_TYPE=f32");
+                defines.push_back("BLOCK_SIZE=256u");
+                defines.push_back("IQ2_S");
+                defines.push_back("IQ2_S_TABLES");
+                defines.push_back("IQ2_S_GRID");
+                variant += "_iq2_s";
+                break;
+            case GGML_TYPE_IQ3_XXS:
+                defines.push_back("BYTE_HELPERS");
+                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("SRC_TYPE=u32");
+                defines.push_back("DST_TYPE=f32");
+                defines.push_back("BLOCK_SIZE=256u");
+                defines.push_back("IQ3_XXS");
+                defines.push_back("IQ3_XXS_TABLES");
+                defines.push_back("IQ3_XXS_GRID");
+                variant += "_iq3_xxs";
+                break;
+            case GGML_TYPE_IQ3_S:
+                defines.push_back("BYTE_HELPERS");
+                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("SRC_TYPE=u32");
+                defines.push_back("DST_TYPE=f32");
+                defines.push_back("BLOCK_SIZE=256u");
+                defines.push_back("IQ3_S");
+                defines.push_back("IQ3_S_TABLES");
+                defines.push_back("IQ3_S_GRID");
+                variant += "_iq3_s";
+                break;
+            case GGML_TYPE_IQ1_S:
+                defines.push_back("BYTE_HELPERS");
+                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("SRC_TYPE=u32");
+                defines.push_back("DST_TYPE=f32");
+                defines.push_back("BLOCK_SIZE=256u");
+                defines.push_back("IQ1_S");
+                defines.push_back("IQ1_S_GRID");
+                variant += "_iq1_s";
+                break;
+            case GGML_TYPE_IQ4_NL:
+                defines.push_back("BYTE_HELPERS");
+                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("SRC_TYPE=u32");
+                defines.push_back("DST_TYPE=f32");
+                defines.push_back("BLOCK_SIZE=32u");
+                defines.push_back("IQ4_NL");
+                defines.push_back("IQ4_NL_GRID");
+                variant += "_iq4_nl";
+                break;
             default:
                 {
                     std::string type_upper = type_str;
