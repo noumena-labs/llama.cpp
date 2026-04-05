@@ -28,6 +28,13 @@ fn load_src0_f16_at(byte_offset: u32) -> f16 {
     let packed = unpack2x16float(load_src0_u16_at(byte_offset));
     return f16(packed[0]);
 }
+
+fn load_src0_f16_as_f32_at(byte_offset: u32) -> f32 {
+    let word = src0[byte_offset / 4];
+    let shift = (byte_offset & 0x2) * 8;
+    let d_bits = (word >> shift) & 0xFFFF;
+    return unpack2x16float(d_bits)[0];
+}
 #endif
 
 #ifdef U32_DEQUANT_HELPERS_SRC
