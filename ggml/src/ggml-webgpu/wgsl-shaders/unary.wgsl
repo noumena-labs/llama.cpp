@@ -107,7 +107,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let res = src[params.offset_src + src_idx] / (1.0 + exp(-src[params.offset_src + src_idx]));
 #endif
 #ifdef EXP
-    let res = exp(src[params.offset_src + src_idx]);
+    let src_f32 = f32(src[params.offset_src + src_idx]);
+    let res = TYPE(exp(src_f32));
 #endif
 #ifdef LOG
     let res = TYPE(log(f32(src[params.offset_src + src_idx])));
@@ -161,7 +162,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let res = TYPE(select(log(1.0 + exp(src_f32)), src_f32, src_f32 > 20.0));
 #endif
 #ifdef EXPM1
-    let res = exp(src[params.offset_src + src_idx]) - 1.0;
+    let src_f32 = f32(src[params.offset_src + src_idx]);
+    let res = TYPE(exp(src_f32) - 1.0);
 #endif
 #ifdef FLOOR
     let res = floor(src[params.offset_src + src_idx]);
