@@ -183,7 +183,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let res = src[params.offset_src + src_idx] * src[params.offset_src + src_idx];
 #endif
 #ifdef SQRT
-    let res = sqrt(src[params.offset_src + src_idx]);
+    let res = TYPE(sqrt(f32(src[params.offset_src + src_idx])));
 #endif
 #ifdef SIN
     let res_f32 = sin(f32(src[params.offset_src + src_idx]));
