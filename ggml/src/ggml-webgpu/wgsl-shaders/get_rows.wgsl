@@ -614,8 +614,8 @@ fn copy_elements(src_base: u32, dst_base: u32, offset: u32) {
 #ifdef IQ4_XS
 fn copy_elements(src_base: u32, dst_base: u32, offset: u32) {
     let block = src[src_base + offset];
-    let d = f32(block.d);
-    let scales_h = bitcast<u32>(vec2(block.scales_h, 0.0));
+    let d = unpack2x16float(block.d_scales_h)[0];
+    let scales_h = block.d_scales_h >> 16;
     var dst_i = dst_base + offset * 256;
     for (var ib: u32 = 0; ib < 8; ib++) {
         let ls = ((get_byte(block.scales_l, ib / 2) >> (4 * (ib % 2))) & 0xF) | (((scales_h >> (2 * ib)) & 3) << 4);

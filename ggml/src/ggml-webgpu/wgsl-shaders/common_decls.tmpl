@@ -223,8 +223,7 @@ struct iq4_nl {
 
 #ifdef IQ4_XS_T
 struct iq4_xs {
-    d: f16,
-    scales_h: f16,
+    d_scales_h: u32,
     scales_l: u32,
     qs: array<u32, 32>
 };
