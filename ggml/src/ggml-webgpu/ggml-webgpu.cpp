@@ -3708,10 +3708,23 @@ static const struct ggml_backend_reg_i ggml_backend_webgpu_reg_i = {
 
 ggml_backend_reg_t ggml_backend_webgpu_reg() {
     WEBGPU_LOG_DEBUG("ggml_backend_webgpu_reg()");
+    static ggml_backend_webgpu_reg_context ctx = {
+        /* .webgpu_global_ctx = */ nullptr,
+        /* .device_count      = */ 1,
+        /* .name              = */ GGML_WEBGPU_NAME,
+    };
+    static ggml_backend_reg reg = {
+        /* .api_version = */ GGML_BACKEND_API_VERSION,
+        /* .iface       = */ ggml_backend_webgpu_reg_i,
+        /* .context     = */ &ctx,
+    };
 
-    static ggml_backend_webgpu_reg_context ctx;
-    ctx.name         = GGML_WEBGPU_NAME;
-    ctx.device_count = 1;
+    // Keep one Dawn/WebGPU instance alive for the lifetime of the static backend
+    // registry. Recreating it on repeated registry lookups can invalidate
+    // adapter/device references that are still held by the backend/device layer.
+    if (ctx.webgpu_global_ctx != nullptr && ctx.webgpu_global_ctx->instance != nullptr) {
+        return &reg;
+    }
 
     wgpu::InstanceDescriptor               instance_descriptor{};
     std::vector<wgpu::InstanceFeatureName> instance_features = { wgpu::InstanceFeatureName::TimedWaitAny };
@@ -3726,23 +3739,18 @@ ggml_backend_reg_t ggml_backend_webgpu_reg() {
     instance_descriptor.nextInChain        = &instanceTogglesDesc;
 #endif
 
-    wgpu::Instance inst             = wgpu::CreateInstance(&instance_descriptor);
-    ctx.webgpu_global_ctx           = webgpu_global_context(new webgpu_global_context_struct());
-    ctx.webgpu_global_ctx->instance = std::move(inst);
+    wgpu::Instance inst = wgpu::CreateInstance(&instance_descriptor);
 
 #ifdef __EMSCRIPTEN__
-    if (ctx.webgpu_global_ctx->instance == nullptr) {
+    if (inst == nullptr) {
         GGML_LOG_ERROR("ggml_webgpu: Failed to create WebGPU instance. Make sure either -sASYNCIFY or -sJSPI is set\n");
         return nullptr;
     }
 #endif
-    GGML_ASSERT(ctx.webgpu_global_ctx->instance != nullptr);
+    GGML_ASSERT(inst != nullptr);
 
-    static ggml_backend_reg reg = {
-        /* .api_version = */ GGML_BACKEND_API_VERSION,
-        /* .iface       = */ ggml_backend_webgpu_reg_i,
-        /* .context     = */ &ctx,
-    };
+    ctx.webgpu_global_ctx           = webgpu_global_context(new webgpu_global_context_struct());
+    ctx.webgpu_global_ctx->instance = std::move(inst);
     return &reg;
 }
 
