@@ -105,19 +105,6 @@ static inline wgpu::CallbackMode ggml_webgpu_callback_mode() {
 #endif
 }
 
-#ifdef __EMSCRIPTEN__
-static inline void ggml_webgpu_emscripten_yield(int poll_count) {
-    // Favor responsiveness first, then back off to reduce CPU burn if we're stalled.
-    if (poll_count < 64) {
-        emscripten_sleep(0);
-    } else if (poll_count < 4096) {
-        emscripten_sleep(1);
-    } else {
-        emscripten_sleep(2);
-    }
-}
-#endif
-
 // This is a "fake" base pointer, since WebGPU buffers do not have pointers to
 // their locations.
 static void * const webgpu_ptr_base = (void *) (uintptr_t) 0x1000;  // NOLINT
@@ -279,9 +266,6 @@ struct webgpu_global_context_struct {
     wgpu::Buffer         get_tensor_staging_buf;
     // Global mutex for pipeline and staging buffer, will be refactored to exclude pipeline caches.
     std::recursive_mutex mutex;
-    std::mutex           debug_mutex;
-    std::string          last_submit_label;
-    std::atomic<bool>    device_lost = false;
 
     wgpu::Buffer    memset_params_buf;
     webgpu_pipeline memset_pipeline;
@@ -423,43 +407,6 @@ static void ggml_webgpu_create_buffer(wgpu::Device &    device,
 
 /** WebGPU Actions */
 
-static bool ggml_backend_webgpu_wait_future(webgpu_global_context & ctx,
-                                            wgpu::FutureWaitInfo    wait_info,
-                                            const char *            label,
-                                            int                     max_polls = 100000) {
-    GGML_UNUSED(label);
-    if (ctx->device_lost.load()) {
-        return false;
-    }
-#ifndef __EMSCRIPTEN__
-    auto status = ctx->instance.WaitAny(1, &wait_info, UINT64_MAX);
-    if (status == wgpu::WaitStatus::Success) {
-        return true;
-    }
-    return false;
-#else
-    int poll_count = 0;
-    while (poll_count < max_polls) {
-        auto status = ctx->instance.WaitAny(1, &wait_info, 0);
-        if (status == wgpu::WaitStatus::Success) {
-            return true;
-        }
-        if (status == wgpu::WaitStatus::Error) {
-            return false;
-        }
-        if (ctx->device_lost.load()) {
-            return false;
-        }
-        ctx->instance.ProcessEvents();
-#    ifdef __EMSCRIPTEN__
-        ggml_webgpu_emscripten_yield(poll_count);
-#    endif
-        poll_count++;
-    }
-    return false;
-#endif
-}
-
 #ifdef GGML_WEBGPU_GPU_PROFILE
 static void ggml_backend_webgpu_wait_profile_futures(webgpu_global_context &             ctx,
                                                      std::vector<wgpu::FutureWaitInfo> & futures) {
@@ -535,7 +482,7 @@ static void ggml_backend_webgpu_wait_queue(webgpu_global_context & ctx) {
 
     const wgpu::WaitStatus wait_status = ctx->instance.WaitAny(
         ctx->queue.OnSubmittedWorkDone(
-            wgpu::CallbackMode::AllowSpontaneous,
+            ggml_webgpu_callback_mode(),
             [&callback_status, &callback_message](wgpu::QueueWorkDoneStatus status, wgpu::StringView message) {
                 callback_status  = status;
                 callback_message = std::string(message);
@@ -546,7 +493,7 @@ static void ggml_backend_webgpu_wait_queue(webgpu_global_context & ctx) {
                                           "Queue wait", "Queue work", callback_message.c_str());
 }
 
-static bool ggml_backend_webgpu_map_buffer(webgpu_global_context & ctx,
+static void ggml_backend_webgpu_map_buffer(webgpu_global_context & ctx,
                                            wgpu::Buffer &          buffer,
                                            wgpu::MapMode           mode,
                                            size_t                  offset,
@@ -555,7 +502,7 @@ static bool ggml_backend_webgpu_map_buffer(webgpu_global_context & ctx,
     std::string          callback_message;
 
     const wgpu::WaitStatus wait_status = ctx->instance.WaitAny(
-        buffer.MapAsync(mode, offset, size, wgpu::CallbackMode::AllowSpontaneous,
+        buffer.MapAsync(mode, offset, size, ggml_webgpu_callback_mode(),
                         [&callback_status, &callback_message](wgpu::MapAsyncStatus status, wgpu::StringView message) {
                             callback_status  = status;
                             callback_message = std::string(message);
@@ -3479,19 +3426,18 @@ static bool create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
     options.nextInChain                   = &adapterTogglesDesc;
 #endif
 
-    wgpu::Future adapter_future = ctx->webgpu_global_ctx->instance.RequestAdapter(
-        &options, ggml_webgpu_callback_mode(),
-        [&ctx](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, const char * message) {
-            if (status != wgpu::RequestAdapterStatus::Success) {
-                GGML_LOG_ERROR("ggml_webgpu: Failed to get an adapter: %s\n", message);
-                return;
-            }
-            ctx->webgpu_global_ctx->adapter = std::move(adapter);
-        });
-    if (!ggml_backend_webgpu_wait_future(ctx->webgpu_global_ctx, { adapter_future }, "request_adapter") ||
-        ctx->webgpu_global_ctx->adapter == nullptr) {
-        return false;
-    }
+    ctx->webgpu_global_ctx->instance.WaitAny(
+        ctx->webgpu_global_ctx->instance.RequestAdapter(
+            &options, ggml_webgpu_callback_mode(),
+            [&ctx](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, const char * message) {
+                if (status != wgpu::RequestAdapterStatus::Success) {
+                    GGML_LOG_ERROR("ggml_webgpu: Failed to get an adapter: %s\n", message);
+                    return;
+                }
+                ctx->webgpu_global_ctx->adapter = std::move(adapter);
+            }),
+        UINT64_MAX);
+    GGML_ASSERT(ctx->webgpu_global_ctx->adapter != nullptr);
 
     ctx->webgpu_global_ctx->adapter.GetLimits(&ctx->webgpu_global_ctx->capabilities.limits);
 
@@ -3559,14 +3505,8 @@ static bool create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
                 return;
             }
             GGML_UNUSED(device);
-            ctx->webgpu_global_ctx->device_lost.store(true);
-            std::string last_label;
-            {
-                std::lock_guard<std::mutex> lock(ctx->webgpu_global_ctx->debug_mutex);
-                last_label = ctx->webgpu_global_ctx->last_submit_label;
-            }
-            GGML_LOG_ERROR("ggml_webgpu: Device lost! Reason: %d, Message: %s (last submit: %s)\n",
-                           static_cast<int>(reason), std::string(message).c_str(), last_label.c_str());
+            GGML_LOG_ERROR("ggml_webgpu: Device lost! Reason: %d, Message: %s\n", static_cast<int>(reason),
+                           std::string(message).c_str());
         });
     dev_desc.SetUncapturedErrorCallback(
         [](const wgpu::Device & device, wgpu::ErrorType reason, wgpu::StringView message) {
@@ -3591,19 +3531,18 @@ static bool create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
     dev_desc.nextInChain = &deviceTogglesDesc;
 #endif
 
-    wgpu::Future device_future = ctx->webgpu_global_ctx->adapter.RequestDevice(
-        &dev_desc, ggml_webgpu_callback_mode(),
-        [ctx](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
-            if (status != wgpu::RequestDeviceStatus::Success) {
-                GGML_LOG_ERROR("ggml_webgpu: Failed to get a device: %s\n", std::string(message).c_str());
-                return;
-            }
-            ctx->webgpu_global_ctx->device = std::move(device);
-        });
-    if (!ggml_backend_webgpu_wait_future(ctx->webgpu_global_ctx, { device_future }, "request_device") ||
-        ctx->webgpu_global_ctx->device == nullptr) {
-        return false;
-    }
+    ctx->webgpu_global_ctx->instance.WaitAny(
+        ctx->webgpu_global_ctx->adapter.RequestDevice(
+            &dev_desc, ggml_webgpu_callback_mode(),
+            [ctx](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
+                if (status != wgpu::RequestDeviceStatus::Success) {
+                    GGML_LOG_ERROR("ggml_webgpu: Failed to get a device: %s\n", std::string(message).c_str());
+                    return;
+                }
+                ctx->webgpu_global_ctx->device = std::move(device);
+            }),
+        UINT64_MAX);
+    GGML_ASSERT(ctx->webgpu_global_ctx->device != nullptr);
 
     ggml_webgpu_init_memset_pipeline(ctx->webgpu_global_ctx);
     ggml_webgpu_create_buffer(ctx->webgpu_global_ctx->device, ctx->webgpu_global_ctx->memset_params_buf,
