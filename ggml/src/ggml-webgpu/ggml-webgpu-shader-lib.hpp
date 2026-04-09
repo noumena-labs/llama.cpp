@@ -1112,7 +1112,7 @@ class ggml_webgpu_shader_lib {
                 break;
             case GGML_TYPE_Q4_0:
                 defines.push_back("BYTE_HELPERS");
-                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("U32_DEQUANT_HELPERS");
                 defines.push_back("SRC_TYPE=u32");
                 defines.push_back("DST_TYPE=f32");
                 defines.push_back("BLOCK_SIZE=32u");
@@ -1121,7 +1121,7 @@ class ggml_webgpu_shader_lib {
                 break;
             case GGML_TYPE_Q5_0:
                 defines.push_back("BYTE_HELPERS");
-                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("U32_DEQUANT_HELPERS");
                 defines.push_back("SRC_TYPE=u32");
                 defines.push_back("DST_TYPE=f32");
                 defines.push_back("BLOCK_SIZE=32u");
@@ -1130,7 +1130,7 @@ class ggml_webgpu_shader_lib {
                 break;
             case GGML_TYPE_Q8_0:
                 defines.push_back("BYTE_HELPERS");
-                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("U32_DEQUANT_HELPERS");
                 defines.push_back("SRC_TYPE=u32");
                 defines.push_back("DST_TYPE=f32");
                 defines.push_back("BLOCK_SIZE=32u");
@@ -1139,7 +1139,7 @@ class ggml_webgpu_shader_lib {
                 break;
             case GGML_TYPE_Q3_K:
                 defines.push_back("BYTE_HELPERS");
-                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("U32_DEQUANT_HELPERS");
                 defines.push_back("SRC_TYPE=u32");
                 defines.push_back("DST_TYPE=f32");
                 defines.push_back("BLOCK_SIZE=256u");
@@ -1148,7 +1148,7 @@ class ggml_webgpu_shader_lib {
                 break;
             case GGML_TYPE_Q6_K:
                 defines.push_back("BYTE_HELPERS");
-                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("U32_DEQUANT_HELPERS");
                 defines.push_back("SRC_TYPE=u32");
                 defines.push_back("DST_TYPE=f32");
                 defines.push_back("BLOCK_SIZE=256u");
@@ -1157,7 +1157,7 @@ class ggml_webgpu_shader_lib {
                 break;
             case GGML_TYPE_IQ2_XXS:
                 defines.push_back("BYTE_HELPERS");
-                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("U32_DEQUANT_HELPERS");
                 defines.push_back("SRC_TYPE=u32");
                 defines.push_back("DST_TYPE=f32");
                 defines.push_back("BLOCK_SIZE=256u");
@@ -1168,7 +1168,7 @@ class ggml_webgpu_shader_lib {
                 break;
             case GGML_TYPE_IQ2_XS:
                 defines.push_back("BYTE_HELPERS");
-                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("U32_DEQUANT_HELPERS");
                 defines.push_back("SRC_TYPE=u32");
                 defines.push_back("DST_TYPE=f32");
                 defines.push_back("BLOCK_SIZE=256u");
@@ -1179,7 +1179,7 @@ class ggml_webgpu_shader_lib {
                 break;
             case GGML_TYPE_IQ2_S:
                 defines.push_back("BYTE_HELPERS");
-                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("U32_DEQUANT_HELPERS");
                 defines.push_back("SRC_TYPE=u32");
                 defines.push_back("DST_TYPE=f32");
                 defines.push_back("BLOCK_SIZE=256u");
@@ -1190,7 +1190,7 @@ class ggml_webgpu_shader_lib {
                 break;
             case GGML_TYPE_IQ3_XXS:
                 defines.push_back("BYTE_HELPERS");
-                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("U32_DEQUANT_HELPERS");
                 defines.push_back("SRC_TYPE=u32");
                 defines.push_back("DST_TYPE=f32");
                 defines.push_back("BLOCK_SIZE=256u");
@@ -1201,7 +1201,7 @@ class ggml_webgpu_shader_lib {
                 break;
             case GGML_TYPE_IQ3_S:
                 defines.push_back("BYTE_HELPERS");
-                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("U32_DEQUANT_HELPERS");
                 defines.push_back("SRC_TYPE=u32");
                 defines.push_back("DST_TYPE=f32");
                 defines.push_back("BLOCK_SIZE=256u");
@@ -1212,7 +1212,7 @@ class ggml_webgpu_shader_lib {
                 break;
             case GGML_TYPE_IQ1_S:
                 defines.push_back("BYTE_HELPERS");
-                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("U32_DEQUANT_HELPERS");
                 defines.push_back("SRC_TYPE=u32");
                 defines.push_back("DST_TYPE=f32");
                 defines.push_back("BLOCK_SIZE=256u");
@@ -1222,7 +1222,7 @@ class ggml_webgpu_shader_lib {
                 break;
             case GGML_TYPE_IQ4_NL:
                 defines.push_back("BYTE_HELPERS");
-                defines.push_back("U32_DEQUANT_HELPERS_SRC");
+                defines.push_back("U32_DEQUANT_HELPERS");
                 defines.push_back("SRC_TYPE=u32");
                 defines.push_back("DST_TYPE=f32");
                 defines.push_back("BLOCK_SIZE=32u");
