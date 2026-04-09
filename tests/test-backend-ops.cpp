@@ -3066,10 +3066,6 @@ struct test_bin_bcast : public test_case {
         return op == ggml_add ? 1e-4 : 1e-3;
     }
 
-    // For op DIV and F16: due to hardware ULP error during divsion, need to allow a higher nmse error for the gradients.
-    double max_nmse_err() override {
-        return op == ggml_div && type == GGML_TYPE_F16 ? 5e-7 : 1e-7;
-    }
 };
 
 // GGML_OP_ADD_ID
