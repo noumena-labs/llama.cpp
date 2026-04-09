@@ -4076,23 +4076,32 @@ ggml_backend_reg_t ggml_backend_webgpu_reg() {
 
     wgpu::Instance inst = wgpu::CreateInstance(&instance_descriptor);
 
-    wgpu::Adapter adapter;
-    if (ctx.webgpu_global_ctx->instance != nullptr) {
-        wgpu::RequestAdapterOptions options = {};
-
-        // probe for adapter support
-        ctx.webgpu_global_ctx->instance.WaitAny(
-            ctx.webgpu_global_ctx->instance.RequestAdapter(
-                &options, wgpu::CallbackMode::AllowSpontaneous,
-                [&adapter](wgpu::RequestAdapterStatus status, wgpu::Adapter _adapter, const char * message) {
-                    if (status != wgpu::RequestAdapterStatus::Success) {
-                        GGML_LOG_ERROR("ggml_webgpu: Failed to get an adapter: %s\n", message);
-                        return;
-                    }
-                    adapter = std::move(_adapter);
-                }),
-            UINT64_MAX);
+#ifdef __EMSCRIPTEN__
+    if (inst == nullptr) {
+        GGML_LOG_ERROR("ggml_webgpu: Failed to create WebGPU instance. Make sure either -sASYNCIFY or -sJSPI is set\n");
+        return nullptr;
     }
+#endif
+    GGML_ASSERT(inst != nullptr);
+
+    ctx.webgpu_global_ctx           = webgpu_global_context(new webgpu_global_context_struct());
+    ctx.webgpu_global_ctx->instance = std::move(inst);
+
+    // Probe for adapter support
+    wgpu::Adapter               adapter;
+    wgpu::RequestAdapterOptions options = {};
+
+    ctx.webgpu_global_ctx->instance.WaitAny(
+        ctx.webgpu_global_ctx->instance.RequestAdapter(
+            &options, wgpu::CallbackMode::AllowSpontaneous,
+            [&adapter](wgpu::RequestAdapterStatus status, wgpu::Adapter _adapter, const char * message) {
+                if (status != wgpu::RequestAdapterStatus::Success) {
+                    GGML_LOG_ERROR("ggml_webgpu: Failed to get an adapter: %s\n", message);
+                    return;
+                }
+                adapter = std::move(_adapter);
+            }),
+        UINT64_MAX);
 
     if (adapter != nullptr) {
         ctx.device_count = 1;
