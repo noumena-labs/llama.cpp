@@ -96,7 +96,7 @@ fn main(
     // Output layout: [OW, OH, OC, N]
 
     for (var ic: u32 = 0; ic < params.IC; ic += 1) {
-        let w_base_ic = ic * params.sw2 + params.sw3;
+        let w_base_ic = ic * params.sw2 + oc * params.sw3;
         let in_base = n * params.si3 + ic * params.si2;
 
        for (var kh: u32 = 0; kh < params.KH; kh += 1)  {
