@@ -1050,12 +1050,9 @@ static webgpu_encoded_op ggml_webgpu_conv_2d(webgpu_context &       ctx,
         (uint32_t) src0->ne[0],
         (uint32_t) src0->ne[1],
         (uint32_t) src0->ne[2],
-        (uint32_t) src0->ne[3],
 
         (uint32_t) src1->ne[0],
         (uint32_t) src1->ne[1],
-        (uint32_t) src1->ne[2],
-        (uint32_t) src1->ne[3],
 
         (uint32_t) dst->ne[0],
         (uint32_t) dst->ne[1],
