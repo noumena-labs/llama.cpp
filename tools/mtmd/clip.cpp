@@ -229,6 +229,10 @@ struct clip_ctx {
     }
 
     ~clip_ctx() {
+        sched.reset();
+        buf.reset();
+        ctx_data.reset();
+        ctx_gguf.reset();
         ggml_backend_free(backend);
         if (backend != backend_cpu) {
             ggml_backend_free(backend_cpu);
